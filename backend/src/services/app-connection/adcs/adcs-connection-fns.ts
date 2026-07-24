@@ -116,7 +116,8 @@ type TAdcsConnectionTarget = {
 const assertAdcsCaIsReachable = async (
   caName: string,
   target: TAdcsConnectionTarget,
-  deps: TADCSGatewayDeps
+  deps: TADCSGatewayDeps,
+  wasDiscovered: boolean
 ): Promise<void> => {
   try {
     await executeAdcsGatewayOperation<AdcsTemplatesResult>({ ...target, endpoint: "/v1/templates", caName }, deps);
@@ -125,9 +126,10 @@ const assertAdcsCaIsReachable = async (
     // the underlying detail when it adds something (e.g. a transport failure like an SMB/DCOM timeout).
     const detail = (error as Error)?.message ?? "";
     const extraDetail = detail && !detail.includes("E_INVALIDARG") ? ` (${detail})` : "";
-    throw new BadRequestError({
-      message: `Could not reach certificate authority "${caName}" through the gateway. Verify the certificate authority name is correct and that the gateway can connect to the AD CS host.${extraDetail}`
-    });
+    const guidance = wasDiscovered
+      ? `The certificate authority name "${caName}" was discovered from the host, but the gateway could not reach the certificate authority to list its templates. Verify the gateway can connect to the AD CS host over DCOM (MS-WCCE).`
+      : `Could not reach certificate authority "${caName}" through the gateway. Verify the certificate authority name is correct and that the gateway can connect to the AD CS host.`;
+    throw new BadRequestError({ message: `${guidance}${extraDetail}` });
   }
 };
 
@@ -148,7 +150,7 @@ export const resolveAdcsCaName = async (
 
   if (caName) {
     if (ensureReachable) {
-      await assertAdcsCaIsReachable(caName, await getTarget(), deps);
+      await assertAdcsCaIsReachable(caName, await getTarget(), deps, false);
     }
     return caName;
   }
@@ -165,8 +167,11 @@ export const resolveAdcsCaName = async (
     });
   }
 
+  // Discovery above proves SMB/registry reachability plus credentials; this second check proves the CA is
+  // reachable over the different DCOM/MS-WCCE path and can list templates, which is what issuance actually
+  // needs. A CA that discovers but cannot list templates is exactly the broken state we reject up front.
   if (ensureReachable) {
-    await assertAdcsCaIsReachable(discovered.caName, target, deps);
+    await assertAdcsCaIsReachable(discovered.caName, target, deps, true);
   }
 
   return discovered.caName;

@@ -298,15 +298,25 @@ export const ADCSCertificateAuthorityFns = ({
       );
     }
 
-    // Resolve and validate the CA name outside the transaction
-    const resolvedUpdateCaName = configuration
-      ? await resolveAdcsCaName(
+    let resolvedUpdateCaName: string | undefined;
+    if (configuration) {
+      const existingConfig = ca.externalCa.configuration as { caName?: string } | null;
+      const existingCaName = existingConfig?.caName;
+      const normalizedNewCaName = configuration.caName?.trim() || undefined;
+      const configChanged =
+        configuration.appConnectionId !== ca.externalCa.appConnectionId || normalizedNewCaName !== existingCaName;
+
+      if (!configChanged && existingCaName) {
+        resolvedUpdateCaName = existingCaName;
+      } else {
+        resolvedUpdateCaName = await resolveAdcsCaName(
           configuration.caName,
           () => getAdcsConnectionCredentials(configuration.appConnectionId, appConnectionDAL, kmsService),
           { gatewayV2Service, gatewayPoolService },
           { ensureReachable: true }
-        )
-      : undefined;
+        );
+      }
+    }
 
     const updatedCa = await certificateAuthorityDAL.transaction(async (tx) => {
       if (configuration) {
