@@ -54,7 +54,7 @@ type TMembershipIdentityServiceFactoryDep = {
   usageMeteringService: Pick<TUsageMeteringServiceFactory, "emit" | "emitForProject">;
   identityAccessTokenService: Pick<
     TIdentityAccessTokenServiceFactory,
-    "insertOrgMembershipRevocationMarker" | "bumpIdentityRevocationVersion"
+    "insertOrgMembershipRevocationMarker" | "removeOrgMembershipRevocationMarkers" | "bumpIdentityRevocationVersion"
   >;
 };
 
@@ -203,8 +203,24 @@ export const membershipIdentityServiceFactory = ({
         }
       });
       await membershipRoleDAL.insertMany(roleDocs, tx);
+
+      // Re-adding an identity that was previously removed must lift the org-scoped
+      // token revocation, atomically with the membership insert.
+      if (scopeData.scope === AccessScope.Organization) {
+        await identityAccessTokenService.removeOrgMembershipRevocationMarkers({
+          identityId: dto.data.identityId,
+          orgId: scopeData.orgId,
+          tx
+        });
+      }
+
       return doc;
     });
+
+    if (scopeData.scope === AccessScope.Organization) {
+      // Post-commit, so cached membership denies re-check against the restored state.
+      await identityAccessTokenService.bumpIdentityRevocationVersion({ identityId: dto.data.identityId });
+    }
 
     // Adding an identity to a project changes the secret-manager and PAM identity meters (a direct member).
     if (scopeData.scope === AccessScope.Project) {
@@ -286,6 +302,8 @@ export const membershipIdentityServiceFactory = ({
 
     const shouldRevokeOrgTokens =
       scopeData.scope === AccessScope.Organization && data.isActive === false && existingMembership.isActive !== false;
+    const shouldRestoreOrgTokens =
+      scopeData.scope === AccessScope.Organization && data.isActive === true && existingMembership.isActive === false;
 
     const membershipDoc = await membershipIdentityDAL.transaction(async (tx) => {
       const doc =
@@ -344,10 +362,18 @@ export const membershipIdentityServiceFactory = ({
         });
       }
 
+      if (shouldRestoreOrgTokens) {
+        await identityAccessTokenService.removeOrgMembershipRevocationMarkers({
+          identityId: dto.selector.identityId,
+          orgId: scopeData.orgId,
+          tx
+        });
+      }
+
       return { ...doc, roles: insertedRoleDocs };
     });
 
-    if (shouldRevokeOrgTokens) {
+    if (shouldRevokeOrgTokens || shouldRestoreOrgTokens) {
       await identityAccessTokenService.bumpIdentityRevocationVersion({ identityId: dto.selector.identityId });
     }
 

@@ -2,7 +2,14 @@ import { ForbiddenError } from "@casl/ability";
 import slugify from "@sindresorhus/slugify";
 import { Knex } from "knex";
 
-import { AccessScope, OrganizationActionScope, OrgMembershipRole, TGroups, TRoles } from "@app/db/schemas";
+import {
+  AccessScope,
+  OrganizationActionScope,
+  OrgMembershipRole,
+  OrgMembershipStatus,
+  TGroups,
+  TRoles
+} from "@app/db/schemas";
 import { TOidcConfigDALFactory } from "@app/ee/services/oidc/oidc-config-dal";
 import { DatabaseErrorCode } from "@app/lib/error-codes";
 import {
@@ -969,6 +976,28 @@ export const groupServiceFactory = ({
     return { user: users[0], group: groupMembership.group };
   };
 
+  // Joining/leaving this group changes the identity's effective org
+  // access only in orgs where the group holds a membership row and the identity
+  // has no direct access.
+  const groupMembershipAffectsIdentityOrgAccess = async (groupId: string, identityId: string) => {
+    const groupOrgMemberships = await membershipDAL.find({
+      scope: AccessScope.Organization,
+      actorGroupId: groupId
+    });
+    if (groupOrgMemberships.length === 0) return false;
+
+    const identityDirectMemberships = await membershipDAL.find({
+      scope: AccessScope.Organization,
+      actorIdentityId: identityId
+    });
+    const directOrgIds = new Set(
+      identityDirectMemberships
+        .filter((membership) => !membership.status || membership.status === OrgMembershipStatus.Accepted)
+        .map((membership) => membership.scopeOrgId)
+    );
+    return groupOrgMemberships.some((membership) => !directOrgIds.has(membership.scopeOrgId));
+  };
+
   const addMachineIdentityToGroup = async ({
     id,
     identityId,
@@ -1046,6 +1075,13 @@ export const groupServiceFactory = ({
       membershipDAL,
       identityGroupMembershipDAL
     });
+
+    // Gaining a group can restore the identity's effective org access, so cached
+    // membership denies must re-check. Skipped when the group grants no org the
+    // identity lacks directly.
+    if (await groupMembershipAffectsIdentityOrgAccess(id, identityId)) {
+      await identityAccessTokenService.bumpIdentityRevocationVersion({ identityId });
+    }
 
     // The identity may now be in a secret-manager or PAM project through this group.
     usageMeteringService.emit(actorOrgId, SecretIdentities.key);
@@ -1231,8 +1267,11 @@ export const groupServiceFactory = ({
       identityIds: [identityId]
     });
 
-    // Losing a group can remove the identity's effective org access.
-    await identityAccessTokenService.bumpIdentityRevocationVersion({ identityId });
+    // Losing a group can remove the identity's effective org access. Skipped when
+    // the group granted no org the identity lacks directly
+    if (await groupMembershipAffectsIdentityOrgAccess(id, identityId)) {
+      await identityAccessTokenService.bumpIdentityRevocationVersion({ identityId });
+    }
 
     // The identity may have left a secret-manager or PAM project it only reached through this group.
     usageMeteringService.emit(actorOrgId, SecretIdentities.key);

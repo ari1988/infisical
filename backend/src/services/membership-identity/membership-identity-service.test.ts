@@ -5,7 +5,11 @@ import { beforeEach, describe, expect, test, vi } from "vitest";
 import { AccessScope } from "@app/db/schemas";
 
 import { membershipIdentityServiceFactory } from "./membership-identity-service";
-import { TDeleteMembershipIdentityDTO } from "./membership-identity-types";
+import {
+  TCreateMembershipIdentityDTO,
+  TDeleteMembershipIdentityDTO,
+  TUpdateMembershipIdentityDTO
+} from "./membership-identity-types";
 
 vi.mock("@app/lib/config/env", () => ({
   getConfig: () => ({})
@@ -35,26 +39,36 @@ const buildDto = (): TDeleteMembershipIdentityDTO => ({
   selector: { identityId: IDENTITY_ID }
 });
 
-const createService = () => {
+const createService = ({
+  existingMembership = { id: MEMBERSHIP_ID, actorIdentityId: IDENTITY_ID }
+}: { existingMembership?: Record<string, unknown> | null } = {}) => {
   const bumpIdentityRevocationVersion = vi.fn().mockResolvedValue(undefined);
   const insertOrgMembershipRevocationMarker = vi.fn().mockResolvedValue(undefined);
+  const removeOrgMembershipRevocationMarkers = vi.fn().mockResolvedValue(undefined);
 
   const membershipIdentityDAL = {
-    findOne: vi.fn().mockResolvedValue({ id: MEMBERSHIP_ID, actorIdentityId: IDENTITY_ID }),
+    findOne: vi.fn().mockResolvedValue(existingMembership),
+    create: vi.fn().mockResolvedValue({ id: MEMBERSHIP_ID, actorIdentityId: IDENTITY_ID }),
+    updateById: vi.fn().mockImplementation(async (id: string, data: Record<string, unknown>) => ({ id, ...data })),
     deleteById: vi.fn().mockResolvedValue({ id: MEMBERSHIP_ID }),
     transaction: vi.fn(async (cb: (tx: Knex) => Promise<unknown>) => cb({} as Knex))
   };
 
   const service = membershipIdentityServiceFactory({
     membershipIdentityDAL: membershipIdentityDAL as never,
-    roleDAL: { find: vi.fn() } as never,
-    membershipRoleDAL: { delete: vi.fn().mockResolvedValue(undefined), insertMany: vi.fn() } as never,
+    roleDAL: { find: vi.fn().mockResolvedValue([]) } as never,
+    membershipRoleDAL: {
+      delete: vi.fn().mockResolvedValue(undefined),
+      insertMany: vi.fn().mockResolvedValue([])
+    } as never,
     permissionService: {
       getOrgPermission: vi
         .fn()
-        .mockResolvedValue({ permission: createMongoAbility([{ action: "manage", subject: "all" }]) })
+        .mockResolvedValue({ permission: createMongoAbility([{ action: "manage", subject: "all" }]) }),
+      // Role name "no-access" skips the privilege-boundary comparison in the guards.
+      getOrgPermissionByRoles: vi.fn().mockResolvedValue([{ role: { name: "no-access" }, permission: null }])
     } as never,
-    orgDAL: { findById: vi.fn(), findEffectiveOrgMembership: vi.fn() } as never,
+    orgDAL: { findById: vi.fn().mockResolvedValue({}), findEffectiveOrgMembership: vi.fn() } as never,
     additionalPrivilegeDAL: { delete: vi.fn().mockResolvedValue(undefined) } as never,
     identityDAL: {
       findById: vi.fn().mockResolvedValue({ orgId: ROOT_ORG_ID, projectId: null })
@@ -66,11 +80,18 @@ const createService = () => {
     usageMeteringService: { emit: vi.fn(), emitForProject: vi.fn() } as never,
     identityAccessTokenService: {
       insertOrgMembershipRevocationMarker,
+      removeOrgMembershipRevocationMarkers,
       bumpIdentityRevocationVersion
     } as never
   });
 
-  return { service, membershipIdentityDAL, bumpIdentityRevocationVersion, insertOrgMembershipRevocationMarker };
+  return {
+    service,
+    membershipIdentityDAL,
+    bumpIdentityRevocationVersion,
+    insertOrgMembershipRevocationMarker,
+    removeOrgMembershipRevocationMarkers
+  };
 };
 
 describe("deleteMembership org revocation bump ordering", () => {
@@ -101,5 +122,93 @@ describe("deleteMembership org revocation bump ordering", () => {
     expect(insertOrgMembershipRevocationMarker).toHaveBeenCalledTimes(1);
     expect(bumpIdentityRevocationVersion).not.toHaveBeenCalled();
     expect(result).toMatchObject({ revocationBumpPending: { identityId: IDENTITY_ID } });
+  });
+});
+
+const buildCreateDto = (): TCreateMembershipIdentityDTO => ({
+  permission: buildDto().permission,
+  scopeData: { scope: AccessScope.Organization, orgId: SUB_ORG_ID },
+  data: { identityId: IDENTITY_ID, roles: [{ role: "member", isTemporary: false }] }
+});
+
+const buildUpdateDto = (isActive?: boolean): TUpdateMembershipIdentityDTO => ({
+  permission: buildDto().permission,
+  scopeData: { scope: AccessScope.Organization, orgId: SUB_ORG_ID },
+  selector: { identityId: IDENTITY_ID },
+  data: { isActive, roles: [{ role: "member", isTemporary: false }] }
+});
+
+describe("createMembership org revocation restore", () => {
+  beforeEach(() => vi.clearAllMocks());
+
+  test("removes org-scoped markers in the transaction and bumps after commit on re-add", async () => {
+    const { service, membershipIdentityDAL, bumpIdentityRevocationVersion, removeOrgMembershipRevocationMarkers } =
+      createService({ existingMembership: null });
+
+    await service.createMembership(buildCreateDto());
+
+    expect(membershipIdentityDAL.transaction).toHaveBeenCalledTimes(1);
+    expect(removeOrgMembershipRevocationMarkers).toHaveBeenCalledTimes(1);
+    expect(removeOrgMembershipRevocationMarkers).toHaveBeenCalledWith({
+      identityId: IDENTITY_ID,
+      orgId: SUB_ORG_ID,
+      tx: expect.anything() as Knex
+    });
+    expect(bumpIdentityRevocationVersion).toHaveBeenCalledTimes(1);
+    expect(bumpIdentityRevocationVersion).toHaveBeenCalledWith({ identityId: IDENTITY_ID });
+  });
+});
+
+describe("updateMembership org revocation restore", () => {
+  beforeEach(() => vi.clearAllMocks());
+
+  test("reactivating an inactive membership removes markers and bumps, never inserts one", async () => {
+    const {
+      service,
+      bumpIdentityRevocationVersion,
+      insertOrgMembershipRevocationMarker,
+      removeOrgMembershipRevocationMarkers
+    } = createService({ existingMembership: { id: MEMBERSHIP_ID, actorIdentityId: IDENTITY_ID, isActive: false } });
+
+    await service.updateMembership(buildUpdateDto(true));
+
+    expect(insertOrgMembershipRevocationMarker).not.toHaveBeenCalled();
+    expect(removeOrgMembershipRevocationMarkers).toHaveBeenCalledTimes(1);
+    expect(removeOrgMembershipRevocationMarkers).toHaveBeenCalledWith({
+      identityId: IDENTITY_ID,
+      orgId: SUB_ORG_ID,
+      tx: expect.anything() as Knex
+    });
+    expect(bumpIdentityRevocationVersion).toHaveBeenCalledTimes(1);
+  });
+
+  test("deactivating an active membership inserts a marker and bumps, never removes markers", async () => {
+    const {
+      service,
+      bumpIdentityRevocationVersion,
+      insertOrgMembershipRevocationMarker,
+      removeOrgMembershipRevocationMarkers
+    } = createService({ existingMembership: { id: MEMBERSHIP_ID, actorIdentityId: IDENTITY_ID, isActive: true } });
+
+    await service.updateMembership(buildUpdateDto(false));
+
+    expect(insertOrgMembershipRevocationMarker).toHaveBeenCalledTimes(1);
+    expect(removeOrgMembershipRevocationMarkers).not.toHaveBeenCalled();
+    expect(bumpIdentityRevocationVersion).toHaveBeenCalledTimes(1);
+  });
+
+  test("an already-active membership updated without an isActive change touches nothing", async () => {
+    const {
+      service,
+      bumpIdentityRevocationVersion,
+      insertOrgMembershipRevocationMarker,
+      removeOrgMembershipRevocationMarkers
+    } = createService({ existingMembership: { id: MEMBERSHIP_ID, actorIdentityId: IDENTITY_ID, isActive: true } });
+
+    await service.updateMembership(buildUpdateDto(undefined));
+
+    expect(insertOrgMembershipRevocationMarker).not.toHaveBeenCalled();
+    expect(removeOrgMembershipRevocationMarkers).not.toHaveBeenCalled();
+    expect(bumpIdentityRevocationVersion).not.toHaveBeenCalled();
   });
 });

@@ -303,6 +303,11 @@ export const evaluateRevocationMarkers = ({
   return null;
 };
 
+// Membership-derived denies are reversible (the identity can be re-added to the
+// org, reactivated, or regain access through a group)
+export const isMembershipDenyReason = (reason: TRevocationDenyReason): boolean =>
+  reason === "org-membership" || reason === "org-membership-inactive";
+
 export const revocationDenyReasonToMessage = (
   reason: TRevocationDenyReason,
   messagePrefix: "Failed to authorize" | "Cannot renew"

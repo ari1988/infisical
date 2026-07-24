@@ -66,7 +66,8 @@ const createService = ({
   );
   const identityAccessTokenRevocationDAL = {
     findActiveRevocationsForToken: vi.fn().mockResolvedValue(activeRevocations),
-    insertRevocation: vi.fn()
+    insertRevocation: vi.fn(),
+    deleteRevocationsByScope: vi.fn()
   };
   const identityDAL = {
     getTrustedIpsByAuthMethod: vi.fn().mockResolvedValue(trustedIps),
@@ -797,11 +798,11 @@ describe("identityAccessTokenServiceFactory", () => {
     );
   });
 
-  test("denies via org-scoped membership marker without a membership re-read when cached", async () => {
+  test("denies via a version-current cached membership deny without a membership re-read", async () => {
     const { service, keyStore, orgDAL } = createService();
     keyStore.getItem.mockImplementation(async (key: string) => {
       if (key.startsWith("identity-revocation-version:")) return "5";
-      if (key.startsWith("identity-revocation-verdict:")) return JSON.stringify({ deny: "org-membership" });
+      if (key.startsWith("identity-revocation-verdict:")) return JSON.stringify({ deny: "org-membership", v: 5 });
       return null;
     });
 
@@ -809,6 +810,86 @@ describe("identityAccessTokenServiceFactory", () => {
       "not a member"
     );
     expect(orgDAL.findEffectiveOrgMembership).not.toHaveBeenCalled();
+  });
+
+  test("caches a cold-path membership deny stamped with the live version", async () => {
+    const { service, keyStore } = createService({ membership: null });
+    keyStore.getItem.mockImplementation(async (key: string) => {
+      if (key.startsWith("identity-revocation-version:")) return "7";
+      return null;
+    });
+
+    await expect(service.fnValidateIdentityAccessTokenFast(createTokenClaims(), "10.0.0.1")).rejects.toThrow(
+      "not a member"
+    );
+    expect(keyStore.setItemWithExpiry).toHaveBeenCalledWith(
+      expect.stringContaining("identity-revocation-verdict:identity-id:"),
+      expect.any(Number),
+      JSON.stringify({ deny: "org-membership", v: 7 })
+    );
+  });
+
+  test("re-checks a stale cached membership deny and allows once membership is restored", async () => {
+    // Deny was stamped at v5; restoring the membership bumped the version to 6.
+    const { service, keyStore, orgDAL } = createService();
+    keyStore.getItem.mockImplementation(async (key: string) => {
+      if (key.startsWith("identity-revocation-version:")) return "6";
+      if (key.startsWith("identity-revocation-verdict:")) return JSON.stringify({ deny: "org-membership", v: 5 });
+      return null;
+    });
+
+    await expect(service.fnValidateIdentityAccessTokenFast(createTokenClaims(), "10.0.0.1")).resolves.toMatchObject({
+      identityId: "identity-id"
+    });
+    expect(orgDAL.findEffectiveOrgMembership).toHaveBeenCalled();
+    // Re-stamped as an allow under the live version.
+    expect(keyStore.setItemWithExpiry).toHaveBeenCalledWith(
+      expect.stringContaining("identity-revocation-verdict:identity-id:"),
+      expect.any(Number),
+      JSON.stringify({ v: 6 })
+    );
+  });
+
+  test("re-checks an unstamped legacy cached membership deny instead of trusting it", async () => {
+    const { service, keyStore, orgDAL } = createService();
+    keyStore.getItem.mockImplementation(async (key: string) => {
+      if (key.startsWith("identity-revocation-version:")) return "5";
+      if (key.startsWith("identity-revocation-verdict:")) return JSON.stringify({ deny: "org-membership" });
+      return null;
+    });
+
+    await expect(service.fnValidateIdentityAccessTokenFast(createTokenClaims(), "10.0.0.1")).resolves.toMatchObject({
+      identityId: "identity-id"
+    });
+    expect(orgDAL.findEffectiveOrgMembership).toHaveBeenCalled();
+  });
+
+  test("serves a cached revocation deny regardless of a version mismatch", async () => {
+    const { service, keyStore, identityAccessTokenRevocationDAL } = createService();
+    keyStore.getItem.mockImplementation(async (key: string) => {
+      if (key.startsWith("identity-revocation-version:")) return "9";
+      if (key.startsWith("identity-revocation-verdict:")) return JSON.stringify({ deny: "auth-method", v: 5 });
+      return null;
+    });
+
+    await expect(service.fnValidateIdentityAccessTokenFast(createTokenClaims(), "10.0.0.1")).rejects.toThrow(
+      "auth method has been revoked"
+    );
+    expect(identityAccessTokenRevocationDAL.findActiveRevocationsForToken).not.toHaveBeenCalled();
+  });
+
+  test("removeOrgMembershipRevocationMarkers deletes the org-scoped markers in the caller tx without bumping", async () => {
+    const { service, identityAccessTokenRevocationDAL, keyStore } = createService();
+    const tx = {} as unknown as Parameters<typeof service.removeOrgMembershipRevocationMarkers>[0]["tx"];
+
+    await service.removeOrgMembershipRevocationMarkers({ identityId: "identity-id", orgId: "org-id", tx });
+
+    expect(identityAccessTokenRevocationDAL.deleteRevocationsByScope).toHaveBeenCalledWith(
+      { identityId: "identity-id", scope: "org-id" },
+      tx
+    );
+    // The bump is a separate post-commit step, never triggered by the marker removal.
+    expect(keyStore.incrementSeededWithExpiry).not.toHaveBeenCalled();
   });
 
   test("insertOrgMembershipRevocationMarker writes an org-scoped marker in the caller tx without bumping", async () => {

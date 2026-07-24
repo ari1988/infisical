@@ -46,6 +46,19 @@ export const identityAccessTokenRevocationDALFactory = (db: TDbClient) => {
     }
   };
 
+  // Scoped markers are the only reversible kind (org membership can be restored),
+  // so they are the only ones with a delete path.
+  const deleteRevocationsByScope = async ({ identityId, scope }: { identityId: string; scope: string }, tx?: Knex) => {
+    try {
+      await (tx ?? db)(TableName.IdentityAccessTokenRevocation)
+        .where("identityId", identityId)
+        .where("scope", scope)
+        .del();
+    } catch (error) {
+      throw new DatabaseError({ error, name: "IdentityAccessTokenRevocationDeleteByScope" });
+    }
+  };
+
   const findActiveRevocationsForToken = async ({
     tokenId,
     identityId,
@@ -148,6 +161,7 @@ export const identityAccessTokenRevocationDALFactory = (db: TDbClient) => {
 
   return {
     insertRevocation,
+    deleteRevocationsByScope,
     findActiveRevocationsForToken,
     removeExpiredRevocations
   };

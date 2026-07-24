@@ -24,6 +24,7 @@ import {
   hasFullRenewClaims,
   hasLegacyTokenWithoutExpExceededMaxAge,
   hasNonWildcardTrustedIps,
+  isMembershipDenyReason,
   parseUsesRemaining,
   resolveTtlInputs,
   revocationDenyReasonToMessage,
@@ -140,12 +141,15 @@ export const identityAccessTokenServiceFactory = ({
 
   // A cached "allowed" answer is only trusted while the identity's version
   // number still matches, so a revoke instantly invalidates it without ever
-  // storing the set of revocation records. A cached "denied"
-  // answer needs no version check and stands for its whole lifetime, because a
-  // revocation record always outlives any token it can block.
+  // storing the set of revocation records. A cached "denied" answer from a
+  // revocation needs no version check and stands for its whole lifetime,
+  // because a revocation record always outlives any token it can block.
   //
   // Org membership is folded into this path: on a cache miss / version change we
   // re-check membership in Postgres; on a stamped allow hit we skip that query.
+  // Membership denies are reversible (re-add / reactivate), so they are
+  // version-stamped like allows and only trusted while the version matches;
+  // restoring membership bumps the version to force an immediate re-check.
   const assertTokenIsNotRevoked = async ({
     tokenId,
     identityId,
@@ -199,7 +203,14 @@ export const identityAccessTokenServiceFactory = ({
       }
 
       if (parsed?.deny) {
-        throw new UnauthorizedError({ message: revocationDenyReasonToMessage(parsed.deny, messagePrefix) });
+        // A membership deny is only honored while its stamped version matches the
+        // live one; a stale one falls through to the cold path and re-checks.
+        const denyIsCurrent =
+          !isMembershipDenyReason(parsed.deny) ||
+          (typeof parsed.v === "number" && cachedVersion !== null && parsed.v === cachedVersion);
+        if (denyIsCurrent) {
+          throw new UnauthorizedError({ message: revocationDenyReasonToMessage(parsed.deny, messagePrefix) });
+        }
       }
       // An allow only holds while the stamped version still matches the live one.
       if (parsed && typeof parsed.v === "number" && cachedVersion !== null && parsed.v === cachedVersion) {
@@ -258,8 +269,13 @@ export const identityAccessTokenServiceFactory = ({
           KeyStoreTtls.IdentityRevocationVerdictBaseInSeconds,
           KeyStoreTtls.IdentityRevocationVerdictJitterInSeconds
         );
-        if (denyReason) {
+        if (denyReason && !isMembershipDenyReason(denyReason)) {
           await keyStore.setItemWithExpiry(verdictKey, ttl, JSON.stringify({ deny: denyReason }));
+        } else if (denyReason) {
+          // Version-stamped so restoring membership (bump) invalidates it instantly.
+          if (versionForStamp !== null) {
+            await keyStore.setItemWithExpiry(verdictKey, ttl, JSON.stringify({ deny: denyReason, v: versionForStamp }));
+          }
         } else if (versionForStamp !== null) {
           await keyStore.setItemWithExpiry(verdictKey, ttl, JSON.stringify({ v: versionForStamp }));
         }
@@ -763,6 +779,19 @@ export const identityAccessTokenServiceFactory = ({
     );
   };
 
+  // Inverse of insertOrgMembershipRevocationMarker, for restoring org access (membership re-added or reactivated)
+  const removeOrgMembershipRevocationMarkers = async ({
+    identityId,
+    orgId,
+    tx
+  }: {
+    identityId: string;
+    orgId: string;
+    tx?: Knex;
+  }) => {
+    await identityAccessTokenRevocationDAL.deleteRevocationsByScope({ identityId, scope: orgId }, tx);
+  };
+
   // Best-effort cache accelerator: bumps the version so cached allow verdicts are
   // rechecked once. A failed bump only defers enforcement to the verdict TTL, since the committed
   // membership row (and marker) remain the durable deny that the cold path reads.
@@ -778,6 +807,7 @@ export const identityAccessTokenServiceFactory = ({
     revokeAllTokensForClientSecret,
     revokeTokensForIdentityAuthMethod,
     insertOrgMembershipRevocationMarker,
+    removeOrgMembershipRevocationMarkers,
     bumpIdentityRevocationVersion,
     markPerTokenRevocation,
     fnValidateIdentityAccessTokenFast
