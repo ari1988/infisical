@@ -235,12 +235,34 @@ describe("identityAccessTokenServiceFactory", () => {
 
     await service.revokeAllTokensForIdentity("identity-id");
 
-    expect(identityAccessTokenRevocationDAL.insertRevocation).toHaveBeenCalledWith({
-      id: "identity-id",
-      identityId: "identity-id",
-      revokedAt: new Date(NOW_SECONDS * 1000),
-      expiresAt: new Date((NOW_SECONDS + MAX_AGE) * 1000)
-    });
+    expect(identityAccessTokenRevocationDAL.insertRevocation).toHaveBeenCalledWith(
+      {
+        id: "identity-id",
+        identityId: "identity-id",
+        revokedAt: new Date(NOW_SECONDS * 1000),
+        expiresAt: new Date((NOW_SECONDS + MAX_AGE) * 1000)
+      },
+      undefined
+    );
+  });
+
+  test("insertIdentityWideRevocationMarker writes the sentinel in the caller tx without bumping", async () => {
+    const { service, identityAccessTokenRevocationDAL, keyStore } = createService();
+    const tx = {} as unknown as Parameters<typeof service.insertIdentityWideRevocationMarker>[0]["tx"];
+
+    await service.insertIdentityWideRevocationMarker({ identityId: "identity-id", tx });
+
+    expect(identityAccessTokenRevocationDAL.insertRevocation).toHaveBeenCalledWith(
+      {
+        id: "identity-id",
+        identityId: "identity-id",
+        revokedAt: new Date(NOW_SECONDS * 1000),
+        expiresAt: new Date((NOW_SECONDS + MAX_AGE) * 1000)
+      },
+      tx
+    );
+    // The bump runs post-commit in the caller, never inside the marker insert.
+    expect(keyStore.incrementSeededWithExpiry).not.toHaveBeenCalled();
   });
 
   test("writes per-token revocation to PG for exact legacy tokens", async () => {

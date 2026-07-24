@@ -48,6 +48,7 @@ const createService = ({
 
   const membershipIdentityDAL = {
     findOne: vi.fn().mockResolvedValue(existingMembership),
+    findByIdForUpdate: vi.fn().mockResolvedValue(existingMembership),
     create: vi.fn().mockResolvedValue({ id: MEMBERSHIP_ID, actorIdentityId: IDENTITY_ID }),
     updateById: vi.fn().mockImplementation(async (id: string, data: Record<string, unknown>) => ({ id, ...data })),
     deleteById: vi.fn().mockResolvedValue({ id: MEMBERSHIP_ID }),
@@ -210,5 +211,29 @@ describe("updateMembership org revocation restore", () => {
     expect(insertOrgMembershipRevocationMarker).not.toHaveBeenCalled();
     expect(removeOrgMembershipRevocationMarkers).not.toHaveBeenCalled();
     expect(bumpIdentityRevocationVersion).not.toHaveBeenCalled();
+  });
+
+  test("decides revoke/restore from the row-locked in-transaction read, not the stale pre-read", async () => {
+    // Pre-transaction read says active; by the time the tx locks the row a
+    // concurrent update deactivated it. Reactivating must follow the locked
+    // read (restore), not the stale snapshot (no-op).
+    const {
+      service,
+      membershipIdentityDAL,
+      bumpIdentityRevocationVersion,
+      insertOrgMembershipRevocationMarker,
+      removeOrgMembershipRevocationMarkers
+    } = createService({ existingMembership: { id: MEMBERSHIP_ID, actorIdentityId: IDENTITY_ID, isActive: true } });
+    membershipIdentityDAL.findByIdForUpdate.mockResolvedValue({
+      id: MEMBERSHIP_ID,
+      actorIdentityId: IDENTITY_ID,
+      isActive: false
+    });
+
+    await service.updateMembership(buildUpdateDto(true));
+
+    expect(removeOrgMembershipRevocationMarkers).toHaveBeenCalledTimes(1);
+    expect(insertOrgMembershipRevocationMarker).not.toHaveBeenCalled();
+    expect(bumpIdentityRevocationVersion).toHaveBeenCalledTimes(1);
   });
 });

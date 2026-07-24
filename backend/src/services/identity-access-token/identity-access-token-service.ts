@@ -689,18 +689,25 @@ export const identityAccessTokenServiceFactory = ({
     await bumpRevocationVersion(identityId);
   };
 
-  // Identity-wide revoke: any JWT with iat < this epoch is rejected on auth.
-  // Uses the 90d fallback since it is one marker per deleted identity.
-  const revokeAllTokensForIdentity = async (identityId: string) => {
+  // Identity-wide revoke marker: any JWT with iat < this epoch is rejected on
+  // auth. Uses the 90d fallback since it is one marker per deleted identity.
+  const insertIdentityWideRevocationMarker = async ({ identityId, tx }: { identityId: string; tx?: Knex }) => {
     const appCfg = getConfig();
     const revokedAt = new Date();
 
-    await identityAccessTokenRevocationDAL.insertRevocation({
-      id: identityId,
-      identityId,
-      revokedAt,
-      expiresAt: new Date(revokedAt.getTime() + appCfg.MAX_MACHINE_IDENTITY_TOKEN_AGE * 1000)
-    });
+    await identityAccessTokenRevocationDAL.insertRevocation(
+      {
+        id: identityId,
+        identityId,
+        revokedAt,
+        expiresAt: new Date(revokedAt.getTime() + appCfg.MAX_MACHINE_IDENTITY_TOKEN_AGE * 1000)
+      },
+      tx
+    );
+  };
+
+  const revokeAllTokensForIdentity = async (identityId: string) => {
+    await insertIdentityWideRevocationMarker({ identityId });
     await bumpRevocationVersion(identityId);
   };
 
@@ -802,6 +809,7 @@ export const identityAccessTokenServiceFactory = ({
   return {
     issueIdentityAccessToken,
     renewAccessToken,
+    insertIdentityWideRevocationMarker,
     revokeAccessToken,
     revokeAllTokensForIdentity,
     revokeAllTokensForClientSecret,

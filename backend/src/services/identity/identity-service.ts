@@ -54,7 +54,7 @@ type TIdentityServiceFactoryDep = {
   usageMeteringService: Pick<TUsageMeteringServiceFactory, "emit">;
   identityAccessTokenService: Pick<
     TIdentityAccessTokenServiceFactory,
-    "revokeAllTokensForIdentity" | "insertOrgMembershipRevocationMarker" | "bumpIdentityRevocationVersion"
+    "insertIdentityWideRevocationMarker" | "insertOrgMembershipRevocationMarker" | "bumpIdentityRevocationVersion"
   >;
 };
 
@@ -382,9 +382,11 @@ export const identityServiceFactory = ({
       if (identityOrgMembership.identity.hasDeleteProtection)
         throw new BadRequestError({ message: "Identity has delete protection" });
 
-      await identityAccessTokenService.revokeAllTokensForIdentity(id);
-
-      const deletedIdentity = await identityDAL.deleteById(id);
+      const deletedIdentity = await identityDAL.transaction(async (tx) => {
+        await identityAccessTokenService.insertIdentityWideRevocationMarker({ identityId: id, tx });
+        return identityDAL.deleteById(id, tx);
+      });
+      await identityAccessTokenService.bumpIdentityRevocationVersion({ identityId: id });
       await licenseService.updateSubscriptionOrgMemberCount(identityOrgMembership.scopeOrgId);
       usageMeteringService.emit(identityOrgMembership.scopeOrgId, IdentitiesMeter.key);
       usageMeteringService.emit(identityOrgMembership.scopeOrgId, SecretIdentities.key);

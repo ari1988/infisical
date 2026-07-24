@@ -300,15 +300,22 @@ export const membershipIdentityServiceFactory = ({
 
     const customRolesGroupBySlug = groupBy(customRoles, ({ slug }) => slug);
 
-    const shouldRevokeOrgTokens =
-      scopeData.scope === AccessScope.Organization && data.isActive === false && existingMembership.isActive !== false;
-    const shouldRestoreOrgTokens =
-      scopeData.scope === AccessScope.Organization && data.isActive === true && existingMembership.isActive === false;
+    let shouldRevokeOrgTokens = false;
+    let shouldRestoreOrgTokens = false;
 
     const membershipDoc = await membershipIdentityDAL.transaction(async (tx) => {
+      const currentMembership = await membershipIdentityDAL.findByIdForUpdate(existingMembership.id, tx);
+      if (!currentMembership) {
+        throw new BadRequestError({ message: "Identity doesn't have membership" });
+      }
+      shouldRevokeOrgTokens =
+        scopeData.scope === AccessScope.Organization && data.isActive === false && currentMembership.isActive !== false;
+      shouldRestoreOrgTokens =
+        scopeData.scope === AccessScope.Organization && data.isActive === true && currentMembership.isActive === false;
+
       const doc =
         typeof data.isActive === "undefined"
-          ? existingMembership
+          ? currentMembership
           : await membershipIdentityDAL.updateById(
               existingMembership.id,
               {
