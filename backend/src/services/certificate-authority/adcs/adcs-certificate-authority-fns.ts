@@ -213,7 +213,8 @@ export const ADCSCertificateAuthorityFns = ({
     const resolvedCaName = await resolveAdcsCaName(
       caName,
       () => getAdcsConnectionCredentials(appConnectionId, appConnectionDAL, kmsService),
-      { gatewayV2Service, gatewayPoolService }
+      { gatewayV2Service, gatewayPoolService },
+      { ensureReachable: true }
     );
 
     const caEntity = await certificateAuthorityDAL.transaction(async (tx) => {
@@ -297,12 +298,13 @@ export const ADCSCertificateAuthorityFns = ({
       );
     }
 
-    // Resolve the CA name outside the transaction (discovery is a gateway call).
+    // Resolve and validate the CA name outside the transaction
     const resolvedUpdateCaName = configuration
       ? await resolveAdcsCaName(
           configuration.caName,
           () => getAdcsConnectionCredentials(configuration.appConnectionId, appConnectionDAL, kmsService),
-          { gatewayV2Service, gatewayPoolService }
+          { gatewayV2Service, gatewayPoolService },
+          { ensureReachable: true }
         )
       : undefined;
 
