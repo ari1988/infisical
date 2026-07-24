@@ -999,6 +999,36 @@ export const kmsServiceFactory = ({
     }
   };
 
+  // Opportunistic cache repair for fresh (skipCache) readers: if a cached entry exists and disagrees with the
+  // project row just read from the DB, drop it so cached readers converge before the TTL expires.
+  const $repairProjectSecretManagerKmsMaterialCache = async (
+    projectId: string,
+    fresh: { kmsSecretManagerKeyId?: string | null; kmsSecretManagerEncryptedDataKey?: Buffer | null }
+  ) => {
+    try {
+      const raw = await keyStore.getItem(KeyStorePrefixes.KmsProjectSecretManagerMaterial(projectId));
+      if (!raw) return;
+      const cached = JSON.parse(raw) as TCachedProjectSmKmsMaterial;
+      const freshEncryptedDataKey = fresh.kmsSecretManagerEncryptedDataKey
+        ? Buffer.from(fresh.kmsSecretManagerEncryptedDataKey).toString("base64")
+        : null;
+      if (
+        cached.kmsSecretManagerKeyId === (fresh.kmsSecretManagerKeyId ?? null) &&
+        cached.kmsSecretManagerEncryptedDataKey === freshEncryptedDataKey
+      ) {
+        return;
+      }
+      logger.warn(
+        { projectId },
+        `Cached project KMS material disagrees with DB; dropping stale cache entry [projectId=${projectId}]`
+      );
+      await $invalidateProjectSecretManagerKmsMaterialCache(projectId);
+    } catch (err) {
+      // best-effort: the fresh read already succeeded, so a failed repair must never fail the request
+      logger.warn({ err, projectId }, `Failed to repair project KMS material cache [projectId=${projectId}]`);
+    }
+  };
+
   const $getCachedProjectSecretManagerKmsMaterial = async (projectId: string) => {
     const cached = await withCache<TCachedProjectSmKmsMaterial>({
       keyStore,
@@ -1046,6 +1076,10 @@ export const kmsServiceFactory = ({
       throw new NotFoundError({ message: `Project with ID '${projectId}' not found` });
     }
 
+    if (!trx && skipCache) {
+      await $repairProjectSecretManagerKmsMaterialCache(projectId, project);
+    }
+
     if (!project.kmsSecretManagerKeyId) {
       if (trx) {
         // eslint-disable-next-line @typescript-eslint/no-unsafe-call
@@ -1069,8 +1103,8 @@ export const kmsServiceFactory = ({
     return { kmsKeyId: project.kmsSecretManagerKeyId, project };
   };
 
-  const getProjectSecretManagerKmsKeyId = async (projectId: string, trx?: Knex) => {
-    const { kmsKeyId } = await $getProjectSecretManagerKmsKeyIdAndProject(projectId, trx);
+  const getProjectSecretManagerKmsKeyId = async (projectId: string, trx?: Knex, skipCache = false) => {
+    const { kmsKeyId } = await $getProjectSecretManagerKmsKeyIdAndProject(projectId, trx, skipCache);
     return kmsKeyId;
   };
 
