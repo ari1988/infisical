@@ -18,7 +18,7 @@ You can use AD CS in a few ways: as an **External CA** that issues certificates 
   certutil -getreg CA\CommonName
   ```
 
-  You can leave it blank only if the Gateway can reach the CA host over SMB (TCP 445), which lets Infisical discover the name for you. Infisical checks the name when you save, so a wrong or unreachable name fails right away instead of creating a broken CA.
+  You can leave it blank only if the Gateway can reach the CA host over SMB (TCP 445), which lets Infisical discover the name for you.
 </Note>
 
 <Tabs>
@@ -35,7 +35,7 @@ You can use AD CS in a few ways: as an **External CA** that issues certificates 
         - **Microsoft ADCS Connection**: Choose your Microsoft ADCS connection
         - **Certificate Authority**: The CA common name, for example `corp-ca01-CA` (run `certutil -getreg CA\CommonName` on the AD CS server to find it). Leave it blank only if the Gateway can reach the CA host over SMB (TCP 445) for automatic discovery.
 
-        Infisical contacts the CA through the Gateway when you save, so a wrong name or an unreachable host is rejected here rather than surfacing later as a CA that cannot list templates or issue.
+        Infisical contacts the CA through the Gateway when you save, so a wrong name or an unreachable host is rejected here.
       </Step>
 
       <Step title="Create a Certificate Profile">
