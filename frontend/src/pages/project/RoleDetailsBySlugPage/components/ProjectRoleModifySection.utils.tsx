@@ -4060,8 +4060,7 @@ export const RoleTemplates: Record<ProjectType, RoleTemplate[]> = {
     {
       id: "agent-proxy",
       name: "Agent Proxy Policies",
-      description:
-        "For the Agent Proxy identity: reads brokered secret values and mints dynamic-secret leases",
+      description: "Reads secret values, mints dynamic secret leases, and reports service usage",
       permissions: [
         {
           subject: ProjectPermissionSub.Secrets,
@@ -4073,14 +4072,17 @@ export const RoleTemplates: Record<ProjectType, RoleTemplate[]> = {
         {
           subject: ProjectPermissionSub.DynamicSecrets,
           actions: [ProjectPermissionDynamicSecretActions.Lease]
+        },
+        {
+          subject: ProjectPermissionSub.ProxiedServices,
+          actions: [ProjectPermissionProxiedServiceActions.ReportUsage]
         }
       ]
     },
     {
       id: "agent",
       name: "Agent Policies",
-      description:
-        "For an agent identity: routes traffic through proxied services without reading secrets",
+      description: "Routes traffic through proxied services",
       permissions: [
         {
           subject: ProjectPermissionSub.ProxiedServices,
